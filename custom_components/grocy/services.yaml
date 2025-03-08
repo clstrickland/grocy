@@ -116,10 +116,17 @@ execute_chore:
       selector:
         text:
     done_by:
-      name: User Id
-      example: '0'
-      required: true
+      name: Grocy User Id
+      example: '1'
+      required: false
       description: The id of the user who executed the chore
+      selector:
+        text:
+    done_by_hass_user_id:
+      name: Home Assistant User Id
+      example: '1234567890abcdef1234567890abcdef'
+      required: false
+      description: The Home Assistant id of the user who executed the chore. Home Assistant username must match Grocy username.
       selector:
         text:
     track_execution_now:
