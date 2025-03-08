@@ -10,6 +10,10 @@ from datetime import datetime
 from .const import ATTR_CHORES, ATTR_TASKS, DOMAIN
 from .coordinator import GrocyDataUpdateCoordinator
 
+import logging
+from homeassistant.exceptions import ServiceValidationError
+_LOGGER = logging.getLogger(__name__)
+
 SERVICE_PRODUCT_ID = "product_id"
 SERVICE_AMOUNT = "amount"
 SERVICE_PRICE = "price"
@@ -18,6 +22,7 @@ SERVICE_SUBPRODUCT_SUBSTITUTION = "allow_subproduct_substitution"
 SERVICE_TRANSACTION_TYPE = "transaction_type"
 SERVICE_CHORE_ID = "chore_id"
 SERVICE_DONE_BY = "done_by"
+SERVICE_DONE_BY_HASS_USER_ID = "done_by_hass_user_id"
 SERVICE_EXECUTION_NOW = "track_execution_now"
 SERVICE_SKIPPED = "skipped"
 SERVICE_TASK_ID = "task_id"
@@ -77,6 +82,7 @@ SERVICE_EXECUTE_CHORE_SCHEMA = vol.All(
         {
             vol.Required(SERVICE_CHORE_ID): vol.Coerce(int),
             vol.Optional(SERVICE_DONE_BY): vol.Coerce(int),
+            vol.Optional(SERVICE_DONE_BY_HASS_USER_ID): str,
             vol.Optional(SERVICE_EXECUTION_NOW): bool,
             vol.Optional(SERVICE_SKIPPED): bool,
         }
@@ -265,17 +271,57 @@ async def async_consume_product_service(hass, coordinator, data):
     await hass.async_add_executor_job(wrapper)
 
 
-async def async_execute_chore_service(hass, coordinator, data):
-    should_track_now = data.get(SERVICE_EXECUTION_NOW, False)
 
+async def async_execute_chore_service(hass, coordinator, data):
     """Execute a chore in Grocy."""
+    should_track_now = data.get("execution_now", False)
     chore_id = data[SERVICE_CHORE_ID]
     done_by = data.get(SERVICE_DONE_BY, "")
-    tracked_time = datetime.now() if should_track_now else None
     skipped = data.get(SERVICE_SKIPPED, False)
+    done_by_hass_user_id = data.get(SERVICE_DONE_BY_HASS_USER_ID, "")
+    tracked_time = datetime.now() if should_track_now else None
 
-    def wrapper():
-        coordinator.grocy_api.execute_chore(chore_id, done_by, tracked_time, skipped=skipped)
+    if (done_by != "") and done_by_hass_user_id:
+        raise ServiceValidationError("Both done_by and done_by_hass_user_id provided. Use only one.")
+
+    if (done_by == "") and not done_by_hass_user_id:
+        raise ServiceValidationError("Either done_by or done_by_hass_user_id must be provided.")
+
+    if done_by_hass_user_id:
+        hass_user = await hass.auth.async_get_user(done_by_hass_user_id)
+        if not hass_user or not hass_user.credentials:
+            raise ServiceValidationError(
+                f"Hass user with ID {done_by_hass_user_id} not found or no credentials."
+            )
+
+        try:
+            username = next(
+                cred.data["username"]
+                for cred in hass_user.credentials
+                if cred.auth_provider_type == "homeassistant"
+            )
+        except StopIteration:
+            raise ServiceValidationError(
+                f"Username not found in credentials for hass user ID {done_by_hass_user_id}."
+            )
+
+        def wrapper():
+            try:
+                grocy_user_id_from_hass = next(
+                    user.id for user in coordinator.grocy_api.users() if user.username == username
+                )
+            except StopIteration:
+                raise ServiceValidationError(f"Grocy user not found for username {username}.")
+            
+            _LOGGER.warning(f"Executing chore {chore_id} for user {grocy_user_id_from_hass}")
+            coordinator.grocy_api.execute_chore(chore_id, grocy_user_id_from_hass, tracked_time, skipped=skipped)
+
+    else:
+        grocy_user_id_to_use = done_by
+        
+        def wrapper():
+            _LOGGER.warning(f"Executing chore {chore_id} for user {grocy_user_id_to_use}")
+            coordinator.grocy_api.execute_chore(chore_id, grocy_user_id_to_use, tracked_time, skipped=skipped)
 
     await hass.async_add_executor_job(wrapper)
     await _async_force_update_entity(coordinator, ATTR_CHORES)
